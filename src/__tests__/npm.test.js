@@ -1,20 +1,4 @@
-import { info, getDownloads, getDependents } from '../npm';
-
-describe('info()', () => {
-  let registryInfo;
-  beforeAll(async () => {
-    registryInfo = await info();
-  });
-
-  it('contains the correct keys', () => {
-    expect(registryInfo).toEqual(
-      expect.objectContaining({
-        nbDocs: expect.any(Number),
-        seq: expect.any(Number),
-      })
-    );
-  });
-});
+import { getDownloads, getDependents } from '../npm';
 
 describe('getDependents()', () => {
   let dependents;

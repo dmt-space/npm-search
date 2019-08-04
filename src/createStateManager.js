@@ -1,8 +1,8 @@
-import c from './config.js';
+import config from './config.js';
 import datadog from './datadog.js';
 
 const defaultState = {
-  seq: c.seq,
+  seq: config.seq,
   bootstrapDone: false,
   bootstrapLastId: undefined,
 };
@@ -10,8 +10,12 @@ const defaultState = {
 let currentState;
 
 export default algoliaIndex => ({
+  async init() {
+    await algoliaIndex.setSettings({});
+  },
+
   async check() {
-    if (c.seq !== null) return this.reset();
+    if (config.seq !== null) return this.reset();
     const state = await this.get();
 
     if (state === undefined) {

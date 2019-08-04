@@ -1,24 +1,23 @@
 import got from 'got';
 import log from './log.js';
-import c from './config.js';
+import config from './config.js';
 import datadog from './datadog.js';
 
 const hits = new Map();
 
 function formatHits(pkg) {
-  if (pkg.type !== 'npm') {
-    return;
-  }
-
   hits.set(pkg.name, pkg.hits);
 }
 
+/**
+ * Load downloads hits
+ */
 export async function loadHits() {
   const start = Date.now();
   log.info('📦  Loading hits from jsDelivr');
 
   try {
-    const { body: hitsJSON } = await got(c.jsDelivrHitsEndpoint, {
+    const { body: hitsJSON } = await got(config.jsDelivrHitsEndpoint, {
       json: true,
     });
     hits.clear();
@@ -30,6 +29,10 @@ export async function loadHits() {
   datadog.timing('jsdelivr.loadHits', Date.now() - start);
 }
 
+/**
+ * Get download hits
+ * @param {array} pkgs
+ */
 export function getHits(pkgs) {
   const start = Date.now();
   return pkgs.map(({ name }) => {
@@ -45,4 +48,24 @@ export function getHits(pkgs) {
       },
     };
   });
+}
+
+/**
+ * Get packages files list
+ * @param {array} pkgs
+ */
+export async function getAllFilesList(pkgs) {
+  const files = await Promise.all(pkgs.map(getFilesList));
+  return files;
+}
+
+/**
+ * Get one package files list
+ * @param {object} pkg
+ */
+async function getFilesList(pkg) {
+  const files = await got(`${config.jsDelivrPackageEndpoint}/${pkg.name}`, {
+    json: true,
+  });
+  return files;
 }

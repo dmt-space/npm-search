@@ -6,7 +6,9 @@ const defaultConfig = {
   npmRegistryEndpoint: 'https://replicate.npmjs.com/registry',
   npmDownloadsEndpoint: 'https://api.npmjs.org/downloads',
   npmRootEndpoint: 'https://registry.npmjs.org',
-  jsDelivrHitsEndpoint: 'https://data.jsdelivr.com/v1/stats/packages/month/all',
+  jsDelivrPackageEndpoint: 'https://data.jsdelivr.com/v1/package/npm',
+  jsDelivrHitsEndpoint:
+    'https://data.jsdelivr.com/v1/stats/packages/npm/month/all',
   unpkgRoot: 'https://unpkg.com',
   maxObjSize: 450000,
   popularDownloadsRatio: 0.005,
@@ -16,6 +18,7 @@ const defaultConfig = {
   bootstrapIndexName: 'npm-search-bootstrap',
   replicateConcurrency: 10,
   bootstrapConcurrency: 100,
+  packagesPrefetchMax: 200,
   timeToRedoBootstrap: ms('2 weeks'),
   seq: null,
   indexSettings: {

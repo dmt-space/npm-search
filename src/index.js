@@ -1,34 +1,33 @@
-import PouchDB from 'pouchdb-http';
 import ms from 'ms';
 import cargo from 'async/cargo.js';
 import queue from 'async/queue.js';
 import createStateManager from './createStateManager.js';
 import saveDocs from './saveDocs.js';
 import createAlgoliaIndex from './createAlgoliaIndex.js';
-import c from './config.js';
+import config from './config.js';
 import * as npm from './npm.js';
 import log from './log.js';
 import datadog from './datadog.js';
 import { loadHits } from './jsDelivr.js';
+import PackagesFetcher from './npm/packagesFetcher.js';
+import wait from './utils/wait.js';
+import npmAPI from './npm/api.js';
 
 log.info('🗿 npm ↔️ Algolia replication starts ⛷ 🐌 🛰');
 
-const db = new PouchDB(c.npmRegistryEndpoint, {
-  ajax: {
-    timeout: ms('2.5m'), // default is 10s
-  },
-});
-const defaultOptions = {
-  include_docs: true, // eslint-disable-line camelcase
-  conflicts: false,
-  attachments: false,
-};
-
 let loopStart = Date.now();
 
-const { index: mainIndex, client } = createAlgoliaIndex(c.indexName);
-const { index: bootstrapIndex } = createAlgoliaIndex(c.bootstrapIndexName);
+const { index: mainIndex, client } = createAlgoliaIndex(config.indexName);
+const { index: bootstrapIndex } = createAlgoliaIndex(config.bootstrapIndexName);
 const stateManager = createStateManager(mainIndex);
+const packagesFetcher = new PackagesFetcher(
+  {
+    limit: config.bootstrapConcurrency,
+    max: config.packagesPrefetchMax,
+    concurrency: 2,
+  },
+  stateManager
+);
 
 /**
  * Main process
@@ -40,6 +39,7 @@ async function main() {
   let start = Date.now();
   // first we make sure the bootstrap index has the correct settings
   log.info('💪  Setting up Algolia');
+  await stateManager.init();
   await setSettings(bootstrapIndex);
   datadog.timing('main.init_algolia', Date.now() - start);
 
@@ -66,11 +66,11 @@ async function main() {
 main().catch(error);
 
 async function setSettings(index) {
-  await index.setSettings(c.indexSettings);
-  await index.batchSynonyms(c.indexSynonyms, {
+  await index.setSettings(config.indexSettings);
+  await index.batchSynonyms(config.indexSynonyms, {
     replaceExistingSynonyms: true,
   });
-  const { taskID } = await index.batchRules(c.indexRules, {
+  const { taskID } = await index.batchRules(config.indexRules, {
     replaceExistingRules: true,
   });
 
@@ -78,8 +78,7 @@ async function setSettings(index) {
 }
 
 async function logUpdateProgress(seq, nbChanges, emoji) {
-  const npmInfo = await npm.info();
-
+  const npmInfo = await npmAPI.getInfo();
   const ratePerSecond = nbChanges / ((Date.now() - loopStart) / 1000);
   const remaining = ((npmInfo.seq - seq) / ratePerSecond) * 1000 || 0;
   log.info(
@@ -93,9 +92,7 @@ async function logUpdateProgress(seq, nbChanges, emoji) {
   loopStart = Date.now();
 }
 
-async function logBootstrapProgress(offset, nbDocs) {
-  const { nbDocs: totalDocs } = await npm.info();
-
+function logBootstrapProgress(offset, nbDocs, totalDocs) {
   const ratePerSecond = nbDocs / ((Date.now() - loopStart) / 1000);
   log.info(
     `[progress] %d/%d docs (%d%), current rate: %d docs/s (%s remaining)`,
@@ -121,20 +118,31 @@ async function bootstrap(state) {
 
   await loadHits();
 
-  const { seq, nbDocs: totalDocs } = await npm.info();
+  const { seq } = await npmAPI.getInfo();
   if (!state.bootstrapLastId) {
     // Start from 0
-    log.info('⛷   Bootstrap: starting from the first doc');
     // first time this launches, we need to remember the last seq our bootstrap can trust
     await stateManager.save({ seq });
     await setSettings(bootstrapIndex);
   } else {
-    log.info('⛷   Bootstrap: starting at doc %s', state.bootstrapLastId);
+    packagesFetcher.nextKey = state.bootstrapLastId;
   }
 
+  Promise.all([
+    await packagesFetcher.syncTotalWithNPM(),
+    await packagesFetcher.syncOffset(),
+  ]);
+
   log.info('-----');
-  log.info(`Total packages   ${totalDocs}`);
+  log.info(`Total packages    ${packagesFetcher.total}`);
+  log.info(`Starting offset   ${packagesFetcher.nextOffset}`);
+  log.info(
+    '⛷   Bootstrap: starting at doc %s',
+    packagesFetcher.nextKey || '"first doc"'
+  );
   log.info('-----');
+
+  await packagesFetcher.launch({ fullPreftech: true });
 
   let lastProcessedId = state.bootstrapLastId;
   while (lastProcessedId !== null) {
@@ -153,49 +161,51 @@ async function bootstrap(state) {
 
 /**
  * Execute one loop for bootstrap,
- *   Fetch N packages from `lastId`, process and save them to Algolia
- * @param {string} lastId
+ *   Fetch N packages from `lastProcessedId`, process and save them to Algolia
+ * @param {string} lastProcessedId
  */
-async function bootstrapLoop(lastId) {
+async function bootstrapLoop(lastProcessedId) {
   const start = Date.now();
-  log.info('loop()', '::', lastId);
+  log.info('loop()');
 
-  const options =
-    lastId === undefined
-      ? {}
-      : {
-          startkey: lastId,
-          skip: 1,
-        };
+  const packages = packagesFetcher.get();
+  packagesFetcher.prefetch();
 
-  const start2 = Date.now();
-  const res = await db.allDocs({
-    ...defaultOptions,
-    ...options,
-    limit: c.bootstrapConcurrency,
-  });
-  datadog.timing('db.allDocs', Date.now() - start2);
-
-  if (res.rows.length <= 0) {
-    // Nothing left to process
-    // We return null to stop the bootstraping
-    return null;
+  if (packages.length <= 0) {
+    if (packagesFetcher.isFinished) {
+      // Nothing left to process
+      // We return null to stop the bootstraping
+      log.info('loop done');
+      return null;
+    } else {
+      log.warn('🥴  We process packages faster than we prefetch them');
+      await wait(3000);
+      return lastProcessedId;
+    }
   }
 
-  datadog.increment('packages', res.rows.length);
-  log.info('  - fetched', res.rows.length, 'packages');
+  const newLastId = packages[packages.length - 1].id;
+  log.info('::', newLastId);
 
-  const newLastId = res.rows[res.rows.length - 1].id;
+  datadog.increment('packages', packages.length);
+  log.info('  - fetched', packages.length, 'packages');
 
-  const saved = await saveDocs({ docs: res.rows, index: bootstrapIndex });
+  const saved = await saveDocs({ docs: packages, index: bootstrapIndex });
   stateManager.save({
     bootstrapLastId: newLastId,
   });
   log.info(`  - saved ${saved} packages`);
 
-  await logBootstrapProgress(res.offset, res.rows.length);
+  await logBootstrapProgress(
+    packagesFetcher.actualOffset,
+    packages.length,
+    packagesFetcher.total
+  );
 
   datadog.timing('loop', Date.now() - start);
+
+  // Be nice
+  await wait(1000);
 
   return newLastId;
 }
@@ -204,7 +214,7 @@ async function moveToProduction() {
   log.info('🚚  starting move to production');
 
   const currentState = await stateManager.get();
-  await client.copyIndex(c.bootstrapIndexName, c.indexName);
+  await client.copyIndex(config.bootstrapIndexName, config.indexName);
 
   await stateManager.save(currentState);
 }
@@ -212,7 +222,7 @@ async function moveToProduction() {
 async function replicate({ seq }) {
   log.info(
     '🐌   Replicate: Asking for %d changes since sequence %d',
-    c.replicateConcurrency,
+    config.replicateConcurrency,
     seq
   );
 
@@ -220,21 +230,18 @@ async function replicate({ seq }) {
     stage: 'replicate',
   });
 
-  const { seq: npmSeqToReach } = await npm.info();
+  const { seq: npmSeqToReach } = await npmAPI.getInfo();
   let npmSeqReached = false;
 
   return new Promise((resolve, reject) => {
-    const start2 = Date.now();
-    const changes = db.changes({
-      ...defaultOptions,
+    const listener = npmAPI.listenToChanges({
       since: seq,
-      batch_size: c.replicateConcurrency, // eslint-disable-line camelcase
+      batch_size: config.replicateConcurrency, // eslint-disable-line camelcase
       live: true,
       return_docs: false, // eslint-disable-line camelcase
     });
-    datadog.timing('db.changes', Date.now() - start2);
 
-    const q = cargo(async docs => {
+    const changesConsumer = cargo(async docs => {
       datadog.increment('packages', docs.length);
 
       try {
@@ -247,15 +254,15 @@ async function replicate({ seq }) {
       } catch (e) {
         return e;
       }
-    }, c.replicateConcurrency);
+    }, config.replicateConcurrency);
 
-    changes.on('change', async change => {
+    listener.on('change', async change => {
       if (change.deleted === true) {
         await mainIndex.deleteObject(change.id);
         log.info(`🐌  Deleted ${change.id}`);
       }
 
-      q.push(change, err => {
+      changesConsumer.push(change, err => {
         if (err) {
           reject(err);
         }
@@ -263,12 +270,12 @@ async function replicate({ seq }) {
 
       if (change.seq >= npmSeqToReach) {
         npmSeqReached = true;
-        changes.cancel();
+        listener.cancel();
       }
     });
-    changes.on('error', reject);
+    listener.on('error', reject);
 
-    q.drain(() => {
+    changesConsumer.drain(() => {
       if (npmSeqReached) {
         log.info('🐌  We reached the npm current sequence');
         resolve();
@@ -287,15 +294,14 @@ async function watch({ seq }) {
   });
 
   return new Promise((resolve, reject) => {
-    const changes = db.changes({
-      ...defaultOptions,
+    const listener = npmAPI.listenToChanges({
       since: seq,
+      batch_size: config.replicateConcurrency, // eslint-disable-line camelcase
       live: true,
-      batch_size: 1, // eslint-disable-line camelcase
       return_docs: false, // eslint-disable-line camelcase
     });
 
-    const q = queue(async change => {
+    const changesConsumer = queue(async change => {
       datadog.increment('packages');
 
       try {
@@ -311,7 +317,7 @@ async function watch({ seq }) {
         // when the process is running longer than a certain time
         // we want to start over and get all info again
         // we do this by exiting and letting Heroku start over
-        if (now - lastBootstrapped > c.timeToRedoBootstrap) {
+        if (now - lastBootstrapped > config.timeToRedoBootstrap) {
           await stateManager.set({
             seq: 0,
             bootstrapDone: false,
@@ -325,18 +331,18 @@ async function watch({ seq }) {
       }
     }, 1);
 
-    changes.on('change', async change => {
+    listener.on('change', async change => {
       if (change.deleted === true) {
         await mainIndex.deleteObject(change.id);
         log.info(`🛰 Deleted ${change.id}`);
       }
-      q.push(change, err => {
+      changesConsumer.push(change, err => {
         if (err) {
           reject(err);
         }
       });
     });
-    changes.on('error', reject);
+    listener.on('error', reject);
   });
 }
 

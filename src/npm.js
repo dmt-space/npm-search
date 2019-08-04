@@ -2,26 +2,9 @@ import got from 'got';
 import chunk from 'lodash/chunk.js';
 import numeral from 'numeral';
 
-import c from './config.js';
+import config from './config.js';
 import log from './log.js';
 import datadog from './datadog.js';
-
-export async function info() {
-  const start = Date.now();
-
-  const {
-    body: { doc_count: nbDocs, update_seq: seq },
-  } = await got(c.npmRegistryEndpoint, {
-    json: true,
-  });
-
-  datadog.timing('npm.info', Date.now() - start);
-
-  return {
-    nbDocs,
-    seq,
-  };
-}
 
 const logWarning = ({ error, type, packagesStr }) => {
   log.warn(
@@ -34,7 +17,7 @@ export async function validatePackageExists(pkgName) {
 
   let exists;
   try {
-    const response = await got(`${c.npmRootEndpoint}/${pkgName}`, {
+    const response = await got(`${config.npmRootEndpoint}/${pkgName}`, {
       json: true,
       method: 'HEAD',
     });
@@ -69,7 +52,7 @@ export async function getDownloads(pkgs) {
 
   const {
     body: { downloads: totalNpmDownloadsPerDay },
-  } = await got(`${c.npmDownloadsEndpoint}/range/last-month`, {
+  } = await got(`${config.npmDownloadsEndpoint}/range/last-month`, {
     json: true,
   });
   const totalNpmDownloads = totalNpmDownloadsPerDay.reduce(
@@ -81,7 +64,7 @@ export async function getDownloads(pkgs) {
     ...pkgsNamesChunks.map(async pkgsNames => {
       try {
         return await got(
-          `${c.npmDownloadsEndpoint}/point/last-month/${pkgsNames}`,
+          `${config.npmDownloadsEndpoint}/point/last-month/${pkgsNames}`,
           {
             json: true,
           }
@@ -98,7 +81,7 @@ export async function getDownloads(pkgs) {
     ...encodedScopedPackageNames.map(async pkg => {
       try {
         const res = await got(
-          `${c.npmDownloadsEndpoint}/point/last-month/${pkg}`,
+          `${config.npmDownloadsEndpoint}/point/last-month/${pkg}`,
           {
             json: true,
           }
@@ -133,7 +116,7 @@ export async function getDownloads(pkgs) {
       ? downloadsPerPkgName[name].downloads
       : 0;
     const downloadsRatio = (downloadsLast30Days / totalNpmDownloads) * 100;
-    const popular = downloadsRatio > c.popularDownloadsRatio;
+    const popular = downloadsRatio > config.popularDownloadsRatio;
     const downloadsMagnitude = downloadsLast30Days
       ? downloadsLast30Days.toString().length
       : 0;

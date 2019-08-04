@@ -8,7 +8,7 @@
     "url": "https://www.algolia.com"
   },
   "scripts": {
-    "start": "node --max-old-space-size=920 --experimental-modules src/index.js",
+    "start": "node --max_old_space_size=920 --gc_interval=100 --max-semi-space-size=128 --http-server-default-timeout=20 --experimental-modules src/index.js",
     "test": "jest --forceExit && eslint .",
     "test:watch": "jest --watchAll --no-watchman",
     "format": "prettier --write **/*.{js,md,json}",
@@ -67,7 +67,7 @@
     "eslint-plugin-prettier": "2.7.0",
     "eslint-plugin-react": "7.14.3",
     "husky": "0.14.3",
-    "jest": "23.6.0",
+    "jest": "24.8.0",
     "lint-staged": "7.3.0",
     "pre-commit": "1.2.2",
     "prettier": "1.14.3",
@@ -81,6 +81,7 @@
     "testPathIgnorePatterns": [
       "node_modules",
       "lib"
-    ]
+    ],
+    "testEnvironment": "node"
   }
 }
